@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -a -installsuffix cgo -o github-forgejo-mirror .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -buildvcs=false -ldflags '-extldflags "-static" -s -w' -o github-forgejo-mirror .
 
 # Runtime stage
 FROM alpine:latest
