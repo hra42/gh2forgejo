@@ -1,0 +1,21 @@
+services:
+  github-forgejo-mirror:
+    build: .
+    container_name: github-forgejo-mirror
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_USER=${GITHUB_USER}
+      - FORGEJO_URL=${FORGEJO_URL}
+      - FORGEJO_TOKEN=${FORGEJO_TOKEN}
+      - FORGEJO_USER=${FORGEJO_USER}
+      - INCLUDE_PRIVATE=${INCLUDE_PRIVATE:-true}
+      - INCLUDE_FORKS=${INCLUDE_FORKS:-false}
+    volumes:
+      - ./logs:/app/logs
+    restart: "no"
+    networks:
+      - mirror-network
+
+networks:
+  mirror-network:
+    driver: bridge
