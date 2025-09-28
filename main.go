@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -33,10 +34,12 @@ type Config struct {
 	ForgejoToken   string
 	ForgejoUser    string
 	Organization   string
+	MirrorInterval string
 	IncludePrivate bool
 	IncludeForks   bool
 	DryRun         bool
 	CleanupOrphans bool
+	Recreate       bool
 	Concurrent     int
 	Verbose        bool
 	OnlyRepos      []string
@@ -58,20 +61,23 @@ type GitHubRepo struct {
 
 // ForgejoMigrationRequest represents a Forgejo migration API request
 type ForgejoMigrationRequest struct {
-	CloneAddr    string `json:"clone_addr"`
-	RepoName     string `json:"repo_name"`
-	RepoOwner    string `json:"repo_owner,omitempty"`
-	Description  string `json:"description"`
-	Private      bool   `json:"private"`
-	Mirror       bool   `json:"mirror"`
-	AuthToken    string `json:"auth_token,omitempty"`
-	AuthUsername string `json:"auth_username,omitempty"`
-	Issues       bool   `json:"issues"`
-	PullRequests bool   `json:"pull_requests"`
-	Releases     bool   `json:"releases"`
-	Wiki         bool   `json:"wiki"`
-	Milestones   bool   `json:"milestones"`
-	Labels       bool   `json:"labels"`
+	CloneAddr      string `json:"clone_addr"`
+	RepoName       string `json:"repo_name"`
+	RepoOwner      string `json:"repo_owner,omitempty"`
+	Description    string `json:"description"`
+	Private        bool   `json:"private"`
+	Mirror         bool   `json:"mirror"`
+	Service        string `json:"service"`
+	MirrorInterval string `json:"mirror_interval,omitempty"`
+	AuthToken      string `json:"auth_token,omitempty"`
+	AuthPassword   string `json:"auth_password,omitempty"`
+	AuthUsername   string `json:"auth_username,omitempty"`
+	Issues         bool   `json:"issues"`
+	PullRequests   bool   `json:"pull_requests"`
+	Releases       bool   `json:"releases"`
+	Wiki           bool   `json:"wiki"`
+	Milestones     bool   `json:"milestones"`
+	Labels         bool   `json:"labels"`
 }
 
 // ForgejoRepo represents a Forgejo repository
@@ -171,12 +177,28 @@ func (c *Client) GetForgejoRepos(ctx context.Context) ([]*ForgejoRepo, error) {
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if c.config.Verbose && len(bodyBytes) > 0 {
+		fmt.Printf("📋 GetForgejoRepos response (status %d):\n", resp.StatusCode)
+		// Try to pretty print JSON if possible
+		var prettyJSON bytes.Buffer
+		if err := json.Indent(&prettyJSON, bodyBytes, "   ", "  "); err == nil {
+			fmt.Printf("   %s\n", prettyJSON.String())
+		} else {
+			fmt.Printf("   %s\n", string(bodyBytes))
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Forgejo API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("Forgejo API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var repos []*ForgejoRepo
-	if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+	if err := json.Unmarshal(bodyBytes, &repos); err != nil {
 		return nil, fmt.Errorf("failed to decode Forgejo repos: %w", err)
 	}
 
@@ -186,25 +208,44 @@ func (c *Client) GetForgejoRepos(ctx context.Context) ([]*ForgejoRepo, error) {
 // MigrateRepo creates a mirrored repository in Forgejo
 func (c *Client) MigrateRepo(ctx context.Context, repo *GitHubRepo) error {
 	if c.config.DryRun {
-		fmt.Printf("[DRY RUN] Would migrate: %s\n", repo.Name)
+		if c.config.Recreate {
+			fmt.Printf("[DRY RUN] Would delete and recreate: %s\n", repo.Name)
+		} else {
+			fmt.Printf("[DRY RUN] Would migrate: %s\n", repo.Name)
+		}
 		return nil
 	}
 
+	// If recreate flag is set, delete the repository first
+	if c.config.Recreate {
+		if err := c.DeleteRepo(ctx, repo.Name); err != nil {
+			// Log the error but continue with migration
+			if c.config.Verbose {
+				fmt.Printf("⚠️  Failed to delete %s: %v (continuing with migration)\n", repo.Name, err)
+			}
+		}
+		// Add a small delay to ensure deletion is processed
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	migration := &ForgejoMigrationRequest{
-		CloneAddr:    repo.CloneURL,
-		RepoName:     repo.Name,
-		RepoOwner:    c.config.ForgejoUser,
-		Description:  repo.Description,
-		Private:      repo.Private,
-		Mirror:       true,
-		AuthToken:    c.config.GitHubToken,
-		AuthUsername: c.config.GitHubUser,
-		Issues:       true,
-		PullRequests: true,
-		Releases:     true,
-		Wiki:         true,
-		Milestones:   true,
-		Labels:       true,
+		CloneAddr:      repo.CloneURL,
+		RepoName:       repo.Name,
+		RepoOwner:      c.config.ForgejoUser,
+		Description:    repo.Description,
+		Private:        repo.Private,
+		Mirror:         true,
+		Service:        "github",
+		MirrorInterval: c.config.MirrorInterval,
+		AuthToken:      c.config.GitHubToken,
+		AuthPassword:   c.config.GitHubToken,
+		AuthUsername:   c.config.GitHubUser,
+		Issues:         true,
+		PullRequests:   true,
+		Releases:       true,
+		Wiki:           true,
+		Milestones:     true,
+		Labels:         true,
 	}
 
 	// Override owner if organization is specified
@@ -215,6 +256,17 @@ func (c *Client) MigrateRepo(ctx context.Context, repo *GitHubRepo) error {
 	body, err := json.Marshal(migration)
 	if err != nil {
 		return fmt.Errorf("failed to marshal migration request: %w", err)
+	}
+
+	if c.config.Verbose {
+		fmt.Printf("📤 Migration request for %s:\n", repo.Name)
+		// Pretty print the request body
+		var prettyJSON bytes.Buffer
+		if err := json.Indent(&prettyJSON, body, "   ", "  "); err == nil {
+			fmt.Printf("   %s\n", prettyJSON.String())
+		} else {
+			fmt.Printf("   %s\n", string(body))
+		}
 	}
 
 	url := fmt.Sprintf("%s/api/v1/repos/migrate", c.config.ForgejoURL)
@@ -233,15 +285,91 @@ func (c *Client) MigrateRepo(ctx context.Context, repo *GitHubRepo) error {
 	}
 	defer resp.Body.Close()
 
+	// Read response body for verbose logging or error details
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil && c.config.Verbose {
+		fmt.Printf("⚠️  Failed to read response body: %v\n", err)
+	}
+
+	if c.config.Verbose && len(bodyBytes) > 0 {
+		fmt.Printf("📋 Response from Forgejo (status %d):\n", resp.StatusCode)
+		// Try to pretty print JSON if possible
+		var prettyJSON bytes.Buffer
+		if err := json.Indent(&prettyJSON, bodyBytes, "   ", "  "); err == nil {
+			fmt.Printf("   %s\n", prettyJSON.String())
+		} else {
+			fmt.Printf("   %s\n", string(bodyBytes))
+		}
+	}
+
 	if resp.StatusCode == http.StatusCreated {
-		fmt.Printf("✅ Successfully migrated: %s\n", repo.Name)
+		if c.config.Recreate {
+			fmt.Printf("✅ Successfully recreated: %s\n", repo.Name)
+		} else {
+			fmt.Printf("✅ Successfully migrated: %s\n", repo.Name)
+		}
 		return nil
 	} else if resp.StatusCode == http.StatusConflict {
-		fmt.Printf("⚠️  Repository already exists: %s\n", repo.Name)
+		if !c.config.Recreate {
+			fmt.Printf("⚠️  Repository already exists: %s\n", repo.Name)
+			return nil
+		}
+		// If recreate was enabled but we still get conflict, it's an error
+		return fmt.Errorf("repository still exists after deletion: %s", repo.Name)
+	}
+
+	// Include response body in error for non-verbose mode if there's an error
+	if !c.config.Verbose && len(bodyBytes) > 0 {
+		return fmt.Errorf("migration failed with status %d for repo %s: %s", resp.StatusCode, repo.Name, string(bodyBytes))
+	}
+	return fmt.Errorf("migration failed with status %d for repo %s", resp.StatusCode, repo.Name)
+}
+
+// DeleteRepo deletes a repository from Forgejo
+func (c *Client) DeleteRepo(ctx context.Context, repoName string) error {
+	if c.config.DryRun {
+		fmt.Printf("[DRY RUN] Would delete repository: %s\n", repoName)
 		return nil
 	}
 
-	return fmt.Errorf("migration failed with status %d for repo %s", resp.StatusCode, repo.Name)
+	owner := c.config.ForgejoUser
+	if c.config.Organization != "" {
+		owner = c.config.Organization
+	}
+
+	url := fmt.Sprintf("%s/api/v1/repos/%s/%s", c.config.ForgejoURL, owner, repoName)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "token "+c.config.ForgejoToken)
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to delete repository: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body for verbose logging
+	if c.config.Verbose {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err == nil && len(bodyBytes) > 0 {
+			fmt.Printf("📋 Delete response from Forgejo (status %d):\n", resp.StatusCode)
+			fmt.Printf("   %s\n", string(bodyBytes))
+		}
+	}
+
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		fmt.Printf("🗑️  Deleted repository: %s\n", repoName)
+		return nil
+	} else if resp.StatusCode == http.StatusNotFound {
+		// Repository doesn't exist, which is fine for our use case
+		return nil
+	}
+
+	return fmt.Errorf("delete failed with status %d for repo %s", resp.StatusCode, repoName)
 }
 
 // SyncMirror triggers a sync for an existing mirror
@@ -270,6 +398,15 @@ func (c *Client) SyncMirror(ctx context.Context, repoName string) error {
 		return fmt.Errorf("failed to sync mirror: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Read response body for verbose logging
+	if c.config.Verbose {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err == nil && len(bodyBytes) > 0 {
+			fmt.Printf("📋 Sync response from Forgejo (status %d):\n", resp.StatusCode)
+			fmt.Printf("   %s\n", string(bodyBytes))
+		}
+	}
 
 	if resp.StatusCode == http.StatusOK {
 		fmt.Printf("🔄 Sync triggered for: %s\n", repoName)
@@ -327,10 +464,12 @@ func loadConfig() *Config {
 	flag.StringVar(&config.ForgejoToken, "forgejo-token", os.Getenv("FORGEJO_TOKEN"), "Forgejo access token")
 	flag.StringVar(&config.ForgejoUser, "forgejo-user", os.Getenv("FORGEJO_USER"), "Forgejo username")
 	flag.StringVar(&config.Organization, "organization", os.Getenv("FORGEJO_ORG"), "Forgejo organization (optional)")
+	flag.StringVar(&config.MirrorInterval, "mirror-interval", os.Getenv("MIRROR_INTERVAL"), "Mirror sync interval (e.g., '10m', '1h', '24h'). Empty for default.")
 	flag.BoolVar(&config.IncludePrivate, "include-private", os.Getenv("INCLUDE_PRIVATE") == "true", "Include private repositories")
 	flag.BoolVar(&config.IncludeForks, "include-forks", os.Getenv("INCLUDE_FORKS") == "true", "Include forked repositories")
 	flag.BoolVar(&config.DryRun, "dry-run", false, "Show what would be done without making changes")
 	flag.BoolVar(&config.CleanupOrphans, "cleanup", false, "Remove mirrors that no longer exist on GitHub")
+	flag.BoolVar(&config.Recreate, "recreate", os.Getenv("RECREATE_REPOS") == "true", "Delete and recreate existing repositories")
 	flag.IntVar(&config.Concurrent, "concurrent", 3, "Number of concurrent migrations")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Enable verbose logging")
 
@@ -396,6 +535,9 @@ func main() {
 	fmt.Printf("   Target: %s\n", config.ForgejoURL)
 	if config.DryRun {
 		fmt.Printf("   Mode: DRY RUN\n")
+	}
+	if config.Recreate {
+		fmt.Printf("   Mode: RECREATE (will delete existing repos)\n")
 	}
 	fmt.Println()
 
