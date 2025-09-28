@@ -9,6 +9,7 @@ A robust Go command-line tool for automatically mirroring GitHub repositories to
 - **Concurrent Processing**: Configurable parallel migrations
 - **Dry Run Mode**: Test migrations without making changes
 - **Mirror Sync**: Keep existing mirrors updated
+- **Recreate Mode**: Delete and recreate existing repositories for fresh migration
 - **Cleanup**: Remove orphaned mirrors
 - **Progress Tracking**: Real-time status updates
 - **Flexible Config**: Environment variables or command-line flags
@@ -27,8 +28,10 @@ export FORGEJO_USER="your-forgejo-username"
 ### Optional Environment Variables
 ```bash
 export FORGEJO_ORG="your-organization"           # Target organization instead of user
+export MIRROR_INTERVAL="10m"                     # Mirror sync interval (e.g., '10m', '1h', '24h')
 export INCLUDE_PRIVATE="true"                    # Include private repositories
 export INCLUDE_FORKS="true"                      # Include forked repositories
+export RECREATE_REPOS="true"                     # Delete and recreate existing repositories
 export ONLY_REPOS="repo1,repo2,repo3"           # Only migrate specific repos
 export EXCLUDE_REPOS="test-repo,old-repo"       # Exclude specific repos
 ```
@@ -40,12 +43,17 @@ export EXCLUDE_REPOS="test-repo,old-repo"       # Exclude specific repos
 # Migrate all public repositories
 ./github-forgejo-mirror
 
-# Include private repositories
+# Include private repositories (requires GitHub token with 'repo' scope)
 ./github-forgejo-mirror --include-private
 
 # Include forks as well
 ./github-forgejo-mirror --include-private --include-forks
 ```
+
+**Note:** When migrating repositories, the tool automatically configures pull mirrors with authentication:
+- Username: Your GitHub username (from `GITHUB_USER` or `--github-user`)
+- Password/Token: Your GitHub personal access token (from `GITHUB_TOKEN` or `--github-token`)
+This ensures that Forgejo can automatically pull updates from GitHub, even for private repositories.
 
 ### Advanced Usage
 ```bash
@@ -66,6 +74,18 @@ export EXCLUDE_REPOS="test-repo,old-repo"       # Exclude specific repos
 
 # Migration with cleanup of orphaned mirrors
 ./github-forgejo-mirror --cleanup --include-private
+
+# Recreate existing repositories (delete and re-migrate)
+./github-forgejo-mirror --recreate --include-private
+
+# Set custom mirror sync interval (default is Forgejo's default)
+./github-forgejo-mirror --mirror-interval="30m" --include-private
+
+# Use hourly sync for less critical repos
+./github-forgejo-mirror --mirror-interval="1h" --include-private
+
+# Daily sync for archived or stable repos
+./github-forgejo-mirror --mirror-interval="24h" --include-private
 ```
 
 ### Command-line Flags
@@ -77,10 +97,12 @@ Usage of ./github-forgejo-mirror:
   -forgejo-token string      Forgejo access token
   -forgejo-user string       Forgejo username
   -organization string       Forgejo organization (optional)
+  -mirror-interval string    Mirror sync interval (e.g., '10m', '1h', '24h')
   -include-private           Include private repositories
   -include-forks             Include forked repositories
   -dry-run                   Show what would be done without making changes
   -cleanup                   Remove mirrors that no longer exist on GitHub
+  -recreate                  Delete and recreate existing repositories
   -concurrent int            Number of concurrent migrations (default 3)
   -verbose                   Enable verbose logging
   -only string               Comma-separated list of repos to migrate
@@ -117,6 +139,10 @@ GOOS=darwin GOARCH=amd64 go build -o github-forgejo-mirror-darwin-amd64 .
    - `public_repo` (for public repositories)
    - `read:org` (if migrating organization repos)
 
+**Important:** This token is used for two purposes:
+- Fetching repository information from GitHub API
+- **Authentication for pull mirrors** - Forgejo will use this token to authenticate with GitHub and automatically pull changes
+
 ### Forgejo Access Token
 1. Login to your Forgejo instance
 2. Go to Settings → Applications
@@ -139,6 +165,9 @@ GOOS=darwin GOARCH=amd64 go build -o github-forgejo-mirror-darwin-amd64 .
 - 🔄 Automatic periodic sync from GitHub
 - 🔄 Manual sync trigger via API
 - 🔄 Keeps repositories in sync with upstream
+- 🔐 Authenticated pulling using GitHub token and username
+- 🔐 Supports both public and private repository mirroring
+- ⏰ Configurable sync intervals (10m, 30m, 1h, 24h, etc.)
 
 ## 🚨 Error Handling
 
