@@ -30,6 +30,7 @@ const (
 type Config struct {
 	GitHubToken    string
 	GitHubUser     string
+	GitHubOrg      string
 	ForgejoURL     string
 	ForgejoToken   string
 	ForgejoUser    string
@@ -112,23 +113,43 @@ func (c *Client) GetGitHubRepos(ctx context.Context) ([]*GitHubRepo, error) {
 	client.UserAgent = userAgent
 
 	var allRepos []*github.Repository
-	opts := &github.RepositoryListOptions{
-		Type:        "owner",
-		Sort:        "updated",
-		Direction:   "desc",
-		ListOptions: github.ListOptions{PerPage: 100},
-	}
 
-	for {
-		repos, resp, err := client.Repositories.List(ctx, "", opts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch GitHub repos: %w", err)
+	if c.config.GitHubOrg != "" {
+		opts := &github.RepositoryListByOrgOptions{
+			Type:        "all",
+			Sort:        "updated",
+			Direction:   "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
 		}
-		allRepos = append(allRepos, repos...)
-		if resp.NextPage == 0 {
-			break
+		for {
+			repos, resp, err := client.Repositories.ListByOrg(ctx, c.config.GitHubOrg, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch GitHub org repos: %w", err)
+			}
+			allRepos = append(allRepos, repos...)
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
 		}
-		opts.Page = resp.NextPage
+	} else {
+		opts := &github.RepositoryListOptions{
+			Type:        "owner",
+			Sort:        "updated",
+			Direction:   "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		for {
+			repos, resp, err := client.Repositories.List(ctx, "", opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch GitHub repos: %w", err)
+			}
+			allRepos = append(allRepos, repos...)
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
 	}
 
 	var result []*GitHubRepo
@@ -460,6 +481,7 @@ func loadConfig() *Config {
 	// Command line flags
 	flag.StringVar(&config.GitHubToken, "github-token", os.Getenv("GITHUB_TOKEN"), "GitHub personal access token")
 	flag.StringVar(&config.GitHubUser, "github-user", os.Getenv("GITHUB_USER"), "GitHub username")
+	flag.StringVar(&config.GitHubOrg, "github-org", os.Getenv("GITHUB_ORG"), "GitHub organization (optional, lists org repos instead of user repos)")
 	flag.StringVar(&config.ForgejoURL, "forgejo-url", os.Getenv("FORGEJO_URL"), "Forgejo instance URL")
 	flag.StringVar(&config.ForgejoToken, "forgejo-token", os.Getenv("FORGEJO_TOKEN"), "Forgejo access token")
 	flag.StringVar(&config.ForgejoUser, "forgejo-user", os.Getenv("FORGEJO_USER"), "Forgejo username")
@@ -531,7 +553,11 @@ func main() {
 	startTime := time.Now()
 
 	fmt.Printf("🚀 GitHub to Forgejo Mirror Tool v%s\n", version)
-	fmt.Printf("   Source: %s@github.com\n", config.GitHubUser)
+	if config.GitHubOrg != "" {
+		fmt.Printf("   Source: %s (org) @github.com\n", config.GitHubOrg)
+	} else {
+		fmt.Printf("   Source: %s@github.com\n", config.GitHubUser)
+	}
 	fmt.Printf("   Target: %s\n", config.ForgejoURL)
 	if config.DryRun {
 		fmt.Printf("   Mode: DRY RUN\n")
