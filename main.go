@@ -30,7 +30,8 @@ const (
 type Config struct {
 	GitHubToken    string
 	GitHubUser     string
-	GitHubOrg      string
+	GitHubOrgs     []string
+	IncludeUser    bool
 	ForgejoURL     string
 	ForgejoToken   string
 	ForgejoUser    string
@@ -114,25 +115,7 @@ func (c *Client) GetGitHubRepos(ctx context.Context) ([]*GitHubRepo, error) {
 
 	var allRepos []*github.Repository
 
-	if c.config.GitHubOrg != "" {
-		opts := &github.RepositoryListByOrgOptions{
-			Type:        "all",
-			Sort:        "updated",
-			Direction:   "desc",
-			ListOptions: github.ListOptions{PerPage: 100},
-		}
-		for {
-			repos, resp, err := client.Repositories.ListByOrg(ctx, c.config.GitHubOrg, opts)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch GitHub org repos: %w", err)
-			}
-			allRepos = append(allRepos, repos...)
-			if resp.NextPage == 0 {
-				break
-			}
-			opts.Page = resp.NextPage
-		}
-	} else {
+	if len(c.config.GitHubOrgs) == 0 || c.config.IncludeUser {
 		opts := &github.RepositoryListOptions{
 			Type:        "owner",
 			Sort:        "updated",
@@ -152,8 +135,35 @@ func (c *Client) GetGitHubRepos(ctx context.Context) ([]*GitHubRepo, error) {
 		}
 	}
 
+	for _, org := range c.config.GitHubOrgs {
+		opts := &github.RepositoryListByOrgOptions{
+			Type:        "all",
+			Sort:        "updated",
+			Direction:   "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		for {
+			repos, resp, err := client.Repositories.ListByOrg(ctx, org, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch GitHub repos for org %s: %w", org, err)
+			}
+			allRepos = append(allRepos, repos...)
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
+	}
+
 	var result []*GitHubRepo
+	seen := make(map[string]string)
 	for _, repo := range allRepos {
+		// All mirrors land in one Forgejo owner, so names must be unique across sources.
+		if first, dup := seen[repo.GetName()]; dup {
+			log.Printf("WARN: skipping %s, name already taken by %s", repo.GetFullName(), first)
+			continue
+		}
+		seen[repo.GetName()] = repo.GetFullName()
 		// Apply filters
 		if !c.config.IncludeForks && repo.GetFork() {
 			continue
@@ -481,7 +491,9 @@ func loadConfig() *Config {
 	// Command line flags
 	flag.StringVar(&config.GitHubToken, "github-token", os.Getenv("GITHUB_TOKEN"), "GitHub personal access token")
 	flag.StringVar(&config.GitHubUser, "github-user", os.Getenv("GITHUB_USER"), "GitHub username")
-	flag.StringVar(&config.GitHubOrg, "github-org", os.Getenv("GITHUB_ORG"), "GitHub organization (optional, lists org repos instead of user repos)")
+	var githubOrgs string
+	flag.StringVar(&githubOrgs, "github-org", os.Getenv("GITHUB_ORG"), "Comma-separated GitHub organizations (optional, lists org repos instead of user repos)")
+	flag.BoolVar(&config.IncludeUser, "include-user", os.Getenv("INCLUDE_USER") == "true", "Also list the user's own repos when --github-org is set")
 	flag.StringVar(&config.ForgejoURL, "forgejo-url", os.Getenv("FORGEJO_URL"), "Forgejo instance URL")
 	flag.StringVar(&config.ForgejoToken, "forgejo-token", os.Getenv("FORGEJO_TOKEN"), "Forgejo access token")
 	flag.StringVar(&config.ForgejoUser, "forgejo-user", os.Getenv("FORGEJO_USER"), "Forgejo username")
@@ -510,6 +522,7 @@ func loadConfig() *Config {
 	}
 
 	config.OnlyRepos = parseStringSlice(onlyRepos)
+	config.GitHubOrgs = parseStringSlice(githubOrgs)
 	config.ExcludeRepos = parseStringSlice(excludeRepos)
 
 	// Validation
@@ -553,10 +566,11 @@ func main() {
 	startTime := time.Now()
 
 	fmt.Printf("🚀 GitHub to Forgejo Mirror Tool v%s\n", version)
-	if config.GitHubOrg != "" {
-		fmt.Printf("   Source: %s (org) @github.com\n", config.GitHubOrg)
-	} else {
+	if len(config.GitHubOrgs) == 0 || config.IncludeUser {
 		fmt.Printf("   Source: %s@github.com\n", config.GitHubUser)
+	}
+	for _, org := range config.GitHubOrgs {
+		fmt.Printf("   Source: %s (org) @github.com\n", org)
 	}
 	fmt.Printf("   Target: %s\n", config.ForgejoURL)
 	if config.DryRun {
